@@ -1,0 +1,607 @@
+---
+title: "neoneocortex scRNAseq"
+author: "Roberto Amarie"
+date: "2023-07-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Loading library and dataset
+
+```{r library loading}
+#data manipulation
+library(Matrix)
+library(dplyr)
+
+#scRNAseq
+library(Seurat)
+
+#visualization
+library(patchwork)
+library(ggplot2)
+```
+
+```{r dataset loading and initial filtering}
+
+neocortex.data <- load("neocortex/SRA667466_SRS3059964.sparse.RData")
+ #head(rownames(sm))
+ensembl <- gsub("\\_E.*","",rownames(sm))
+ensembl <- make.names(ensembl, unique=TRUE)
+rownames(sm) <- ensembl
+#head(rownames(sm))
+neocortex <- CreateSeuratObject(counts = sm, project = "neocortex6k", min.cells = 3, min.features = 200)
+#rownames(neocortex@assays$RNA)
+```
+# Quality control
+
+## Appending to the Seurat object information on mt% and rbp%
+
+```{r cell quality control | extracting mtprot & riboprot read percentaces and adding them to seurat object}
+grep("^mt",rownames(neocortex),value = TRUE)
+neocortex[["percent.mt"]] <- PercentageFeatureSet(neocortex, pattern = "^mt.")
+
+grep("^Rp[ls]",rownames(neocortex),value = TRUE)
+neocortex[["percent.rbp"]] <- PercentageFeatureSet(neocortex, pattern = "^Rp[ls]")
+
+#head(neocortex@meta.data, 5)
+```
+
+## Diagnostic plots for visual QC inspection
+
+```{r violin plots for quality control}
+VlnPlot(neocortex, features = c("nFeature_RNA", "nCount_RNA", "percent.mt","percent.rbp"), ncol = 4, pt.size=0)
+
+plot1 <- FeatureScatter(neocortex, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(neocortex, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+plot3 <- FeatureScatter(neocortex, feature1 = "nCount_RNA", feature2 = "percent.rbp")
+plot3
+
+summary(neocortex@meta.data$nFeature_RNA)
+boxplot(neocortex@meta.data$nFeature_RNA)$stats[c(1,5)] # lower whisker & upper whisker for reference
+
+summary(neocortex@meta.data$percent.mt)
+boxplot(neocortex@meta.data$percent.mt)$stats[c(1,5)]
+```
+## Filtering data based on the quality metrics defined
+
+```{r subsetting for further analysis}
+neocortex
+neocortex <- subset(neocortex, subset = nFeature_RNA > 200 & nFeature_RNA < 4000 & percent.mt < 10)
+neocortex
+```
+# Normalization
+
+```{r normalizing our counts}
+neocortex <- NormalizeData(neocortex, normalization.method = "LogNormalize", scale.factor = 10000)
+head(neocortex@assays$RNA@counts)
+head(neocortex@assays$RNA@data)
+```
+
+```{r taking a look to the genes that have the highest mean expression across our cells and MALAT1 inspection}
+apply(neocortex@assays$RNA@data,1,mean) -> gene.expression
+sort(gene.expression, decreasing = TRUE) -> gene.expression
+head(gene.expression, n=50)
+
+
+
+# maybe I can ignore this, but yet I should understand if this artifact is present also for other of my genes 
+VlnPlot(neocortex, features = c("Malat1","Gapdh", 'Actb'))
+
+
+Gapdh_index <- which(rownames(neocortex@assays$RNA@data) == "Gapdh")  
+rownames(neocortex@assays$RNA@data)[Gapdh_index]    #countercheck
+hist(neocortex@assays$RNA@counts[Gapdh_index,])
+table(neocortex@assays$RNA@counts[Gapdh_index,])   #(ODD: why my housekeeping genes is not expressed?)
+```
+## Infering cell cycle phase for eventual role in biological variability
+
+```{r cell cycle phase inference}
+cc.genes.updated.2019  
+CellCycleScoring(neocortex, s.features = cc.genes.updated.2019$s.genes, g2m.features = cc.genes.updated.2019$g2m.genes, set.ident = TRUE) -> neocortex
+#neocortex[[]]
+```
+
+## Data scaling
+
+```{r top 2000 most variable genes & scaling the data }
+neocortex <- FindVariableFeatures(neocortex, selection.method = "vst", nfeatures = 2000)
+
+all.genes <- rownames(neocortex)
+neocortex <- ScaleData(neocortex, features = all.genes)
+
+
+
+# optionally: visualizing the top10 variable genes
+top10 <- head(VariableFeatures(neocortex), 10)
+plot2000 <- LabelPoints(plot = VariableFeaturePlot(neocortex), points = top10, repel = TRUE)
+plot2000
+```
+
+# Dimensionality reduction 
+
+## Performing PCA & selecting optimal number of PCs for subsequent steps
+
+```{r PCA and selection of PC numbers}
+neocortex <- RunPCA(neocortex, features = VariableFeatures(object = neocortex))
+print(neocortex[["pca"]], dims = 1:5, nfeatures = 5)
+
+
+PC_var <- VizDimLoadings(neocortex, dims = 1:2, reduction = "pca")
+PC_var +
+  ggtitle("Most Variable genes of the first two PCs") + 
+  theme(plot.title = element_text(hjust = 1.5))
+
+
+DimPlot(neocortex, reduction = "pca")
+
+
+
+elbow_plot <-ElbowPlot(neocortex, ndims=40)  #either 10, 15 or 20   #try to add a dashed line to show them
+elbow_plot + 
+  ggtitle("Elbow Plot") + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_vline(xintercept = 10, linetype = "dashed", color = "red") +
+  geom_vline(xintercept = 15, linetype = "dashed", color = "blue")
+
+
+# Manually instead: (75% variability)
+pc.touse <- (neocortex$pca@stdev)^2
+pc.touse <- pc.touse/sum(pc.touse)
+pc.touse <- cumsum(pc.touse)[1:50]
+pc.touse <- min(which(pc.touse>=0.75))
+pc.touse
+```
+# Graph based Clustering
+
+
+```{r graph-based clustering}
+# choosing the best parameters for the clustering by inspecting different possible combinations
+
+# 7 PCs 
+# neocortex7 <- FindNeighbors(neocortex, dims = 1:7)
+# neocortex7_05 <- FindClusters(neocortex7, resolution = 0.5)
+# neocortex7_10 <- FindClusters(neocortex7, resolution = 1)
+# 
+# neocortex7_05 <- RunUMAP(neocortex7_05, dims = 1:7)
+# DimPlot(neocortex7_05,reduction = "umap", label= TRUE)
+# 
+# neocortex7_10 <- RunUMAP(neocortex7_10, dims = 1:7)
+# DimPlot(neocortex7_10,reduction = "umap", label= TRUE)
+
+# 10 PCs
+
+neocortex10 <- FindNeighbors(neocortex, dims = 1:10)
+neocortex10_05 <- FindClusters(neocortex10, resolution = 0.5)
+neocortex10_10 <- FindClusters(neocortex10, resolution = 1)
+# neocortex10_15 <- FindClusters(neocortex10, resolution = 1.5)
+
+neocortex10_05 <- RunUMAP(neocortex10_05, dims = 1:10)
+plot10_05 <- DimPlot(neocortex10_05, reduction = "umap", label= TRUE)
+plot10_05 +
+  ggtitle("UMAP projection of 10 PCs with resolution=0.5")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+neocortex10_10 <- RunUMAP(neocortex10_10, dims = 1:10)
+plot10_10 <- DimPlot(neocortex10_10, reduction = "umap", label= TRUE)
+plot10_10 +
+  ggtitle("UMAP projection of 10 PCs with resolution=1")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+#neocortex10_15 <- RunUMAP(neocortex10_15, dims = 1:10)
+#DimPlot(neocortex10_15, reduction = "umap", label= TRUE)
+
+
+# 15 PCs
+
+neocortex15 <- FindNeighbors(neocortex, dims = 1:15)
+neocortex15_05 <- FindClusters(neocortex15, resolution = 0.5)
+neocortex15_10 <- FindClusters(neocortex15, resolution = 1)
+# neocortex15_15 <- FindClusters(neocortex15, resolution = 1.5)
+
+neocortex15_05 <- RunUMAP(neocortex15_05, dims = 1:15)
+plot15_05 <- DimPlot(neocortex15_05, reduction = "umap", label= TRUE)
+plot15_05 +
+  ggtitle("UMAP projection of 15 PCs with resolution=0.5")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+neocortex15_10 <- RunUMAP(neocortex15_10, dims = 1:15)
+plot15_10 <- DimPlot(neocortex15_10, reduction = "umap", label= TRUE)
+plot15_10 +                                                                           #rerun this cell
+  ggtitle("UMAP projection of 15 PCs with resolution=1")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+# neocortex15_15 <- RunUMAP(neocortex15_15, dims = 1:15)
+# DimPlot(neocortex15_15, reduction = "umap", label= TRUE)
+
+
+#20 PCs
+
+# neocortex20 <- FindNeighbors(neocortex, dims = 1:20)
+# neocortex20_05 <- FindClusters(neocortex20, resolution = 0.5)
+# neocortex20_10 <- FindClusters(neocortex20, resolution = 1)
+# neocortex20_15 <- FindClusters(neocortex20, resolution = 1.5)
+# 
+# neocortex20_05 <- RunUMAP(neocortex20_05, dims = 1:20)
+# DimPlot(neocortex20_05, reduction = "umap", label= TRUE)
+# 
+# neocortex20_10 <- RunUMAP(neocortex20_10, dims = 1:20)
+# DimPlot(neocortex20_10, reduction = "umap", label= TRUE)
+# 
+# neocortex20_15 <- RunUMAP(neocortex20_15, dims = 1:20)
+# DimPlot(neocortex20_15, reduction = "umap", label= TRUE)
+```
+
+
+```{r distribution of the library size splitted across the cluster}
+# DimPlot(neocortex7_05,reduction = "umap", label= TRUE)
+# VlnPlot(neocortex7_05,features=c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rbp"), pt.size=0, ncol = 2)
+# 
+# DimPlot(neocortex7_10,reduction = "umap", label= TRUE)
+# VlnPlot(neocortex10_10,features=c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rbp"), pt.size=0, ncol = 2)
+
+DimPlot(neocortex10_05, reduction = "umap", label= TRUE)
+VlnPlot(neocortex10_05,features=c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rbp"), pt.size=0, ncol = 2)
+
+DimPlot(neocortex10_10, reduction = "umap", label= TRUE)
+VlnPlot(neocortex10_10,features=c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rbp"), pt.size=0, ncol = 2)
+
+DimPlot(neocortex15_05, reduction = "umap", label= TRUE)
+VlnPlot(neocortex15_05,features=c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rbp"), pt.size=0, ncol = 2)
+
+```
+> 07_05:
+>> ofc too few PCs, just for my didactic purposes to see how clusters would look like when capturing less undelying biological variability
+
+
+
+> 10_05: 
+
+>> 2,6,8 maybe doublets            (given the high nCounts and nFeatures)
+>> 0,10 maybe very damaged         (high mt low feature and counts)    
+>> 11 & 5 maybe slighly damaged    (high mt but still some nFeature and nCounts left)
+
+
+
+> 15_05:  
+
+>> 2 additional clusters than 10_05:     14 and 15
+>> 3,4,9 and 14 might be doublets
+>> 7,10 could be very broken cells  
+>> 0 & 11 maybe just slighlt damage
+
+
+>20_05:
+>> the same as 15_05 with just a bit more spaced out 8 and 14 to indicate dissimilarity
+
+# Checking for the role of the cell cycle (& regressing out either this or mt)
+
+
+```{r Checking if the cell cycle is a major factor}
+DimPlot(neocortex, reduction = "pca")
+
+neocortex15_05@meta.data %>%
+  group_by(seurat_clusters,Phase) %>%
+  count() %>%
+  group_by(seurat_clusters) %>%
+  mutate(percent=100*n/sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(x=seurat_clusters,y=percent, fill=Phase)) +
+  geom_col() +
+  ggtitle("Percentage of cell cycle phases per cluster")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+# The cell cycle does not seem to be an important factor in accounting for the variability in our data so there is no need to regressout the cell cycle scores with the following formula in this case:
+
+##neocortex_unbiased <- ScaleData(neocortex, vars.to.regress = c("S.Score", "G2M.Score"), features = all.genes)
+```
+
+
+```{r remove cell cycle & mt effects}
+#regressing out mitochondrial genes to see the effects
+# OPTIONAL, not always needed but it is interesting in my dataset, nonetheless I commented it for the sake of knitting the Rmd file in reasonable timings
+
+
+#  neocortex_unbiased <- ScaleData(neocortex, vars.to.regress = "percent.mt", features = all.genes)
+#  neocortex_unbiased <- RunPCA(neocortex_unbiased, features = VariableFeatures(object = neocortex))
+#  print(neocortex_unbiased[["pca"]], dims = 1:5, nfeatures = 5)
+#  VizDimLoadings(neocortex_unbiased, dims = 1:2, reduction = "pca")
+#  
+#  DimPlot(neocortex_unbiased, reduction = "pca")
+#  
+#  ElbowPlot(neocortex_unbiased, ndims=40)                                #either 10, 15 or 20
+#  
+#  # Manually instead: (75% variability)
+#  pc.touse <- (neocortex_unbiased$pca@stdev)^2
+#  pc.touse <- pc.touse/sum(pc.touse)
+#  pc.touse <- cumsum(pc.touse)[1:50]
+#  pc.touse <- min(which(pc.touse>=0.75))
+#  pc.touse
+
+```
+
+```{r comparing before and after regressing out mitochondrial genes }
+#  DimPlot(neocortex15_05, reduction = "umap", label= TRUE)
+#  VlnPlot(neocortex15_05,features=c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rbp"), pt.size=0, ncol = 2)
+#  
+#  
+#  neocortex_unbiased15 <- FindNeighbors(neocortex_unbiased, dims = 1:15)
+#  neocortex_unbiased15_05 <- FindClusters(neocortex_unbiased15, resolution = 0.5)
+#  
+#  neocortex_unbiased15_05 <- RunUMAP(neocortex_unbiased15_05, dims = 1:15)
+#  DimPlot(neocortex_unbiased15_05,reduction = "umap", label= TRUE)
+#  VlnPlot(neocortex_unbiased15_05,features=c("nFeature_RNA", "nCount_RNA", "percent.mt", "percent.rbp"), pt.size=0, ncol = 2)
+```
+regressing out mt I end up fusing clusters 1 and 10 of the 15_05 into a single one
+
+
+# Marker gene identification
+
+```{r extracting marker genes for each cluster agains all the others}
+table(neocortex15_05[[]]$seurat_clusters)
+
+neocortex.markers <- FindAllMarkers(neocortex15_05, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+neocortex.markers %>%
+    group_by(cluster) %>%
+    slice_max(n = 5, order_by = avg_log2FC) -> candidate_markers
+
+candidate_markers
+```
+
+## Heatmap
+
+```{r heatmap visualizing marker genes }
+neocortex.markers %>%
+    group_by(cluster) %>%
+    top_n(n = 10, wt = avg_log2FC) -> top10
+DoHeatmap(neocortex15_05, features = top10$gene) + NoLegend() +
+  ggtitle(" One vs All comparison Heatmap")
+  theme(plot.title = element_text(hjust = 0))
+
+
+
+#Used just to better visualize the pattern in the last clusters size very tiny
+DoHeatmap(subset(neocortex15_05, downsample = 100), features = top10$gene, size = 3)
+```
+for the Identification of gene making the difference among clusters with similar expression patterns
+
+## subanalysing the clusters of the neurons
+```{r subanalysing the clusters of the neurons}
+
+# inspecting individually LN and RN compared to the rest
+# RN = neurons on the right of the UMAP (with high counts)
+# LN = the neurons on the left (with high mito %)
+# TOP = these genes are also present in the 5 most expressed in the candidate_marker list
+
+
+clusterRN.markers <- FindMarkers(neocortex15_05, ident.1 = c(3,4,9,14), min.pct = 0.25, test.use = "wilcox")
+clusterRN.markers <- clusterRN.markers[order(-clusterRN.markers$avg_log2FC),]
+head(clusterRN.markers, n = 10)
+# Snca Nrgn Ctxn1 Sncb Pcp4 Snap25 Mllt11 RP23.161B9.10 Ttc9b Stxbp1
+# TOP: Nrgn  Ctxn1 Snca Snap25 Sncb
+
+
+clusterLN.markers <- FindMarkers(neocortex15_05, ident.1 = c(0,7,11), min.pct = 0.25, test.use = "wilcox")
+clusterLN.markers <- clusterLN.markers[order(-clusterLN.markers$avg_log2FC),]
+head(clusterLN.markers, n = 10)
+# Snhg11 Meg3 Atp1a1 Rtn1 Chgb Mir124a.1hg Scg5 Ahi1 Clstn3 Adgrb1
+
+
+
+
+# contrasting RN and LN
+
+
+clusterRNvsLN.markers <- FindMarkers(neocortex15_05, ident.1 = c(3,4,9,14),  ident.2 = c(0,7,11), min.pct = 0.25, test.use = "wilcox")
+clusterRNvsLN.markers <- clusterRNvsLN.markers[order(-clusterRNvsLN.markers$avg_log2FC),]
+head(clusterRNvsLN.markers, n = 10)
+# Nrgn  Ctxn1 AC103620.3 Ywhaz Snca Trbc2 RP23.407N2.2  Basp1 Pcp4  Dynll1
+# TOP: Nrgn  Ctxn1 Snca Trbc2
+
+
+clusterRNvsLN.markers <- clusterRNvsLN.markers[order(clusterRNvsLN.markers$avg_log2FC),]
+head(clusterRNvsLN.markers, n = 10)
+# Mbp Atp1a1 RP23.8J15.3 Snhg11 mt.Cytb mt.Nd4 Ahi1 Snrnp70 Meg3 RP23.445K23.4
+
+
+
+#Inspecting RN
+
+
+cluster3vsRN.markers <- FindMarkers(neocortex15_05, ident.1 = 3, ident.2 = c(4,9,14), min.pct = 0.25, test.use = "wilcox")
+cluster3vsRN.markers <- cluster3vsRN.markers[order(-cluster3vsRN.markers$avg_log2FC),]
+head(cluster3vsRN.markers, n = 10)
+# Rorb  Dkkl1 Nrsn1 Krt12 Plcxd2  Gfra2 Rora  Kcnk2 S100a10 Slc24a3
+# TOP: Nrsn1
+
+
+cluster4vsRN.markers <- FindMarkers(neocortex15_05, ident.1 = 4, ident.2 = c(3,4,9,14), min.pct = 0.25, test.use = "wilcox")
+cluster4vsRN.markers <- cluster4vsRN.markers[order(-cluster4vsRN.markers$avg_log2FC),]
+head(cluster4vsRN.markers, n = 10)
+# Calb1 Tesc  Fam19a1 Atp2b4  Fam84a  Enc1  Cacng3  Rasl10a RP23.178F20.1	Lamp5
+# TOP: Enc1 Calb1
+
+
+cluster9vsRN.markers <- FindMarkers(neocortex15_05, ident.1 = 9, ident.2 = c(3,4,9,14), min.pct = 0.25, test.use = "wilcox")
+cluster9vsRN.markers <- cluster9vsRN.markers[order(-cluster9vsRN.markers$avg_log2FC),]
+head(cluster9vsRN.markers, n = 10)
+# Trbc2 Pcp4  Rprm  Ighm  Hs3st4  AC103620.3  Tle4  Cryab Garnl3  Nptx1
+# TOP: Trbc2 Pcp4  Rprm
+
+
+cluster14vsRN.markers <- FindMarkers(neocortex15_05, ident.1 = 14, ident.2 = c(3,4,9,14), min.pct = 0.25, test.use = "wilcox")
+cluster14vsRN.markers <- cluster14vsRN.markers[order(-cluster14vsRN.markers$avg_log2FC),]
+head(cluster14vsRN.markers, n = 10)
+# Synpr Nr4a2 Gnb4  Lxn RP24.175N4.1  B3gat2  Tmem163 Stk32c  Rgs12 Ppp1r1a
+# TOP: Synpr Nr4a2 Gnb4 Stk32c
+
+
+#Inspecting LN
+
+cluster0vsLN.markers <- FindMarkers(neocortex15_05, ident.1 = 0, ident.2 = c(7,11), min.pct = 0.25, test.use = "wilcox")
+cluster0vsLN.markers <- cluster0vsLN.markers[order(-cluster0vsLN.markers$avg_log2FC),]
+head(cluster0vsLN.markers, n = 10)
+# Atp1a1 Miat Lingo1 Adgrb1 Slc17a7 Nell2 Cacna1e Scn8a R3hdm1 Nrcam
+# LN: None
+# TOP: Atp1a1 Adgrb1
+
+
+
+cluster7vsLN.markers <- FindMarkers(neocortex15_05, ident.1 = 7, ident.2 = c(0,11), min.pct = 0.25, test.use = "wilcox")
+cluster7vsLN.markers <- cluster7vsLN.markers[order(-cluster7vsLN.markers$avg_log2FC),]
+head(cluster7vsLN.markers, n = 10)
+# Calm2 Fkbp1a Ywhah Mllt11 Pcp4 Calm1 Mif RP23.161B9.10 Tmsb4x Nme1
+# LN: Ywhah(?)
+# TOP: Calm2  Mllt11  Pcp4
+
+
+
+cluster11vsLN.markers <- FindMarkers(neocortex15_05, ident.1 = 11, ident.2 = c(0,7), min.pct = 0.25, test.use = "wilcox")
+cluster11vsLN.markers <- cluster11vsLN.markers[order(-cluster11vsLN.markers$avg_log2FC),]
+head(cluster11vsLN.markers, n = 10)
+# Npy Vip Cxcl14 Gad1 Cnr1 Crh Gad2 Slc6a1 Pnoc Slc32a1
+# LN: none
+# TOP: Npy Vip Cnr1 Gad1 Gad2
+
+
+
+#further trying to find a marker for cluster 0
+
+cluster0vsN.markers <- FindMarkers(neocortex15_05, ident.1 = 0, ident.2 = c(7,11,3,4,9,14), min.pct = 0.25, test.use = "wilcox")
+cluster0vsN.markers <- cluster0vsN.markers[order(-cluster0vsN.markers$avg_log2FC),]
+head(cluster0vsN.markers, n = 10)
+# Atp1a1 Miat Lingo1 Adgrb1 Slc17a7 Nell2 Cacna1e Scn8a R3hdm1 Nrcam
+# LN: None
+# TOP: Atp1a1 Adgrb1
+
+#NEW: Snhg11, Meg3, Snrnp70, Ahi1
+
+```
+
+# subanalysing the clusters of the oligodentrocytes, the endothelial cells, astrocytes and the macrophages
+```{r subanalysing the clusters of the oligodentrocytes, the endothelial cells, astrocytes and the macrophages}
+#6,8,13 (oligos)
+
+cluster6vsOLIG.markers <- FindMarkers(neocortex15_05, ident.1 = 6, ident.2 = c(8,13), min.pct = 0.25, test.use = "wilcox")
+cluster6vsOLIG.markers <- cluster6vsOLIG.markers[order(-cluster6vsOLIG.markers$avg_log2FC),]
+head(cluster6vsOLIG.markers, n = 10)
+# Mal Trf Car2  Mog Plp1  Mobp  Mag Ppp1r14a Fth1 Cldn11
+# TOP: Mal Plp1 Mog
+
+cluster8vsOLIG.markers <- FindMarkers(neocortex15_05, ident.1 = 8, ident.2 = c(6,13), min.pct = 0.25, test.use = "wilcox")
+cluster8vsOLIG.markers <- cluster8vsOLIG.markers[order(-cluster8vsOLIG.markers$avg_log2FC),]
+head(cluster8vsOLIG.markers, n = 10)
+# Cspg5 Pdgfra Ptprz1 Serpine2 Apoe Arhgap31 Tmem100 C1ql1 Rgcc Ednrb
+# TOP: Pdgfra Ptprz1
+
+cluster13vsOLIG.markers <- FindMarkers(neocortex15_05, ident.1 = 13, ident.2 = c(6,8), min.pct = 0.25, test.use = "wilcox")
+cluster13vsOLIG.markers <- cluster13vsOLIG.markers[order(-cluster13vsOLIG.markers$avg_log2FC),]
+head(cluster13vsOLIG.markers, n = 10)
+# Bmp4 Fyn Lims2 Dynll2 Mpzl1 Bcas1os2 Enpp6 Pdcd4 Mink1 Cd9
+# TOP: Lims2 Bmp4
+
+
+
+#12,5 (endo)
+
+cluster12vs5.markers <- FindMarkers(neocortex15_05, ident.1 = 12, ident.2 = 5, min.pct = 0.25, test.use = "wilcox")
+cluster12vs5.markers <- cluster12vs5.markers[order(-cluster12vs5.markers$avg_log2FC),]
+head(cluster12vs5.markers, n = 10)
+# Vtn Higd1b Ndufa4l2 Myl9 Pdgfrb Nupr1 Atp1a2 Cald1 Mgp Cd63
+# TOP: Vtn Higd1b Ndufa4l2 Myl9
+
+cluster12vs5.markers <- cluster12vs5.markers[order(cluster12vs5.markers$avg_log2FC),]
+head(cluster12vs5.markers, n = 10)
+# Degs2 Slc7a5 Cd59a Cd34 Itm2a Slco1c1 Tspan13 Cldn5 Bsg S100a16
+# TOP: Cldn5 Itm2a
+
+
+
+#10,1 (astro)
+
+cluster10vs1.markers <- FindMarkers(neocortex15_05, ident.1 = 10, ident.2 = 1, min.pct = 0.25, test.use = "wilcox")
+cluster10vs1.markers <- cluster10vs1.markers[order(-cluster10vs1.markers$avg_log2FC),]
+head(cluster10vs1.markers, n = 10)
+# Rps19 Tuba1a Rpl35a Tmsb4x Rps29 Rps27a Rps3a1 Rps25 Calm2 Rps18
+# ISSUE WITH MT - regressing out it disappears in fact
+
+cluster10vs1.markers <- cluster10vs1.markers[order(cluster10vs1.markers$avg_log2FC),]
+head(cluster10vs1.markers, n = 10)
+# Rn7sk Malat1 Neat1 Rsrp1 RP23.168E14.7 Slco1c1 Zbtb20 Mfge8 Son RP23.81C12.1
+# TOP: Mfge8
+
+
+
+#2,15 (microglia)
+
+cluster15vs2.markers <- FindMarkers(neocortex15_05, ident.1 = 15, ident.2 = 2, min.pct = 0.25, test.use = "wilcox")
+cluster15vs2.markers <- cluster15vs2.markers[order(-cluster15vs2.markers$avg_log2FC),]
+head(cluster15vs2.markers, n = 10)
+# Pf4 Cd209f Lyz2 Ms4a7 Cbr2 Lgals1 Dab2 Apoe F13a1 Clec4n
+# TOP: Lyz2 Pf4 Cd209f  Ms4a7 Cbr2
+
+cluster15vs2.markers <- cluster15vs2.markers[order(cluster15vs2.markers$avg_log2FC),]
+head(cluster15vs2.markers, n = 10)
+# P2ry12 Sparc hexb Tmem119 Cd81 Selplg Cd9 Lpcat2 Cst3 Olfml3
+# TOP: hexb P2ry12
+```
+
+# Visual inspection of the markers choosen
+```{r Visual inspection of the markers choosen}
+
+DotPlot(neocortex15_05, features = c('Adgrb1', 'Mfge8','P2ry12','Gfra2','Calb1','Cldn5','Mog','Mllt11', 'Pdgfra','Trbc2','Rps19','Gad1','Vtn','Bmp4','Synpr','Pf4'))+ 
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+VlnPlot(neocortex15_05, features = c('Adgrb1', 'Mfge8','P2ry12','Gfra2','Calb1','Cldn5','Mog','Mllt11', 'Pdgfra','Trbc2','Rps19','Gad1','Vtn','Bmp4','Synpr','Pf4'), pt.size = 0)
+    #+ ggtitle("DotPlot of the marker genes") 
+    #+theme(plot.title = element_text(hjust = 0.5))
+
+
+FeaturePlot(neocortex15_05, features = c('Bmp4', 'Mog','Pdgfra','Cldn5', 'Vtn','P2ry12', 'Pf4', 'Gfra2','Calb1','Trbc2','Synpr', 'Mfge8','Gad1','Adgrb1','Rps19','Mllt11')) 
+
+
+#VlnPlot(neocortex15_05, features = c('Bmp4', 'Mog','Pdgfra'))
+#VlnPlot(neocortex15_05, features = c('Cldn5', 'Vtn','P2ry12', 'Pf4'))
+#VlnPlot(neocortex15_05, features = c('Gfra2','Calb1','Trbc2','Synpr'))
+#VlnPlot(neocortex15_05, features = c('Mfge8', 'Adgrb1','Vip','Gad1'))
+#
+#FeaturePlot(neocortex15_05, features = c('Bmp4', 'Mog','Pdgfra'))
+#FeaturePlot(neocortex15_05, features = c('Cldn5', 'Vtn','P2ry12', 'Pf4'))
+#FeaturePlot(neocortex15_05, features = c('Gfra2','Calb1','Trbc2','Synpr'))
+#FeaturePlot(neocortex15_05, features = c('Mfge8', 'Adgrb1','Vip','Gad1'))
+```
+By consulting on the Tabula Muris dataset and taking in consideration the QC results obtain, 
+it has been possible to identify the cell type annotated with each of the marker genes identified.
+It therfore emerged that:
+
+Cluster0:     Undefined Neurons
+Cluster1:     Astrocytes
+Cluster2:     Microglia
+Cluster3:     Gfra2+ Neurons
+Cluster4:     Calb1+ Neurons
+Cluster5:     Endothelial cells
+Cluster6:     Oligodendrocytes
+Cluster7:     Damaged Neurons
+Cluster8:     Oligodendrocytes precursor cells
+Cluster9:     Trbc2+ Neurons
+Cluster10:    Damaged Astrocytes
+Cluster11:    Gad1+ Neurons
+Cluster12:    Pericytes
+Cluster13:    Bmp4+ Differentiating Oligodendrocytes
+Cluster14:    Synpr+ Neurons
+Cluster15:    Macrophage
+
+# final clustered dataset
+
+```{r final clustered dataset}
+new.cluster.ids <- c('Undef Neu', 'Astrocytes','Microglia','Gfra2+ Neu','Calb1+ Neu','Endo','Oligodendro','Dmgd Neu', 'Oligo precursor cells','Trbc2+ Neu','Dmgd Astro','Gad1+ Neu','Pericytes','Bmp4+ Diff Oligo','Synpr+ Neu','Macrophage')
+names(new.cluster.ids) <- levels(neocortex15_05)
+renamed_neocortex15_05 <- RenameIdents(neocortex15_05, new.cluster.ids)
+DimPlot(renamed_neocortex15_05, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend() + ggtitle("Final results of murine's neocortex scRNAseq ") + theme(plot.title = element_text(hjust = 0.5))
+```

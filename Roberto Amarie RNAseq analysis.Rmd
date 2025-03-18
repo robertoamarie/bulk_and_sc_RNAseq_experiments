@@ -1,0 +1,352 @@
+---
+title: "BulkRNA analysis"
+author: "Roberto Amarie"
+date: "2023-07-10"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+str(knitr::opts_chunk$get())
+```
+
+# data & library import + coverage count to read count conversion 
+```{r libraries import, message=FALSE}
+library(recount3)
+library(recount)
+library(edgeR)
+library(ggplot2)
+```
+
+```{r data import}
+rse_brain <- readRDS("rse_brain.RDS")
+rse_spleen <- readRDS("rse_spleen.RDS")
+rse_kidney <- readRDS("rse_kidney.RDS")
+assays(rse_brain)$counts <- transform_counts(rse_brain)
+assays(rse_spleen)$counts <- transform_counts(rse_spleen)
+assays(rse_kidney)$counts <- transform_counts(rse_kidney)
+```
+
+
+# QC for replicate isolation 
+inspecting the samples starting from the 11th to find my 3 replicates for each of the tissues
+```{r QC, collapse=TRUE}
+
+#brain
+colData(rse_brain)$gtex.smrin[11]                                       #6.4    OK
+colData(rse_brain)$gtex.smrrnart[11]                                    #0.065  OK
+colData(rse_brain)$'recount_qc.star.uniquely_mapped_reads_%_both'[11]   #89%    OK
+
+
+colData(rse_brain)$gtex.smrin[12]                                       #7.5    GOOD
+colData(rse_brain)$gtex.smrrnart[12]                                    #0.015  GOOD           
+colData(rse_brain)$'recount_qc.star.uniquely_mapped_reads_%_both'[12]   #91.3%  GOOD
+
+colData(rse_brain)$gtex.smrin[13]                                       #7.1    GOOD
+colData(rse_brain)$gtex.smrrnart[13]                                    #0.053  OK
+colData(rse_brain)$'recount_qc.star.uniquely_mapped_reads_%_both'[13]   #89.8%  OK
+
+
+
+
+#spleen
+colData(rse_spleen)$gtex.smrin[11]                                      #6.7    OK
+colData(rse_spleen)$gtex.smrrnart[11]                                   #0.005  VERY GOOD
+colData(rse_spleen)$'recount_qc.star.uniquely_mapped_reads_%_both'[11]  #88.3%  OK
+
+colData(rse_spleen)$gtex.smrin[12]                                      #8.3    VERY GOOD
+colData(rse_spleen)$gtex.smrrnart[12]                                   #0.005  VERY GOOD
+colData(rse_spleen)$'recount_qc.star.uniquely_mapped_reads_%_both'[12]  #89%    OK
+
+colData(rse_spleen)$gtex.smrin[13]                                      #7.1    GOOD
+colData(rse_spleen)$gtex.smrrnart[13]                                   #0.005  VERY GOOD
+colData(rse_spleen)$'recount_qc.star.uniquely_mapped_reads_%_both'[13]  #89.4   OK
+
+
+
+
+#kidney
+colData(rse_kidney)$gtex.smrin[11]                                      #6.2    OK
+colData(rse_kidney)$gtex.smrrnart[11]                                   #0.018  GOOD
+colData(rse_kidney)$'recount_qc.star.uniquely_mapped_reads_%_both'[11]  #88.2%  OK
+
+colData(rse_kidney)$gtex.smrin[12]                                      #5.5    !!!!!BAD!!!!!
+colData(rse_kidney)$gtex.smrrnart[12]                                   #0.052  OK
+colData(rse_kidney)$'recount_qc.star.uniquely_mapped_reads_%_both'[12]  #91%    GOOD
+
+colData(rse_kidney)$gtex.smrin[13]                                      #5.6    !!!!BAD!!!!
+colData(rse_kidney)$gtex.smrrnart[13]                                   #0.057  OK
+colData(rse_kidney)$'recount_qc.star.uniquely_mapped_reads_%_both'[13]  #90.1   GOOD
+
+colData(rse_kidney)$gtex.smrin[14]                                      #5.6
+colData(rse_kidney)$gtex.smrrnart[14]                                   #
+colData(rse_kidney)$'recount_qc.star.uniquely_mapped_reads_%_both'[14]  #
+
+colData(rse_kidney)$gtex.smrin[15]                                      #5.8
+colData(rse_kidney)$gtex.smrrnart[15]                                   #
+colData(rse_kidney)$'recount_qc.star.uniquely_mapped_reads_%_both'[15]  #
+
+colData(rse_kidney)$gtex.smrin[16]                                      #5.9
+colData(rse_kidney)$gtex.smrrnart[16]                                   #
+colData(rse_kidney)$'recount_qc.star.uniquely_mapped_reads_%_both'[16]  #
+
+colData(rse_kidney)$gtex.smrin[17]                                      #7.8    GOOD
+colData(rse_kidney)$gtex.smrrnart[17]                                   #0.009  VERY GOOD
+colData(rse_kidney)$'recount_qc.star.uniquely_mapped_reads_%_both'[17]  #88.9   OK
+
+colData(rse_kidney)$gtex.smrin[18]                                      #7.5    GOOD
+colData(rse_kidney)$gtex.smrrnart[18]                                   #0.028  GOOD
+colData(rse_kidney)$'recount_qc.star.uniquely_mapped_reads_%_both'[18]  #92.3   VERY GOOD 
+
+
+#Ideally if I want to keep only RIN>7 I could use this one instead of the 11:
+colData(rse_kidney)$gtex.smrin[22]                                      #8.4    VERY GOOD
+colData(rse_kidney)$gtex.smrrnart[22]                                   #0.012  GOOD
+colData(rse_kidney)$'recount_qc.star.uniquely_mapped_reads_%_both'[22]  #92.3   VERY GOOD 
+
+```
+
+RIN:
+usually recommend at least 7, but 6 or higher is usually considered to be “acceptable”.
+
+%rRNA:
+should be very low, never anyway higher than 10% (or 0.1 since here is the fraction to be reported)
+
+%uniquely_mapped:
+We want here at least 85% of the reads uniquely mapped, since it is a human sample
+
+# extracting a table with only my replicates for each tissue
+```{r replicates table}
+rse_brain_selected <- rse_brain[,c(11,12,13)]
+rse_spleen_selected <- rse_spleen[,c(11,12,13)]
+rse_kidney_selected <- rse_kidney[,c(11,17,18)]
+counts_brain_selected <- assays(rse_brain_selected)$counts
+counts_spleen_selected <- assays(rse_spleen_selected)$counts
+counts_kidney_selected <- assays(rse_kidney_selected)$counts
+```
+ 
+# formatting the data
+joining everything in a single table,
+reassigning proper names and
+setting up the DEGList data structure for further analysis
+
+```{r DEGList creation}
+x <- cbind(counts_brain_selected,counts_spleen_selected,counts_kidney_selected)
+
+colnames(x) <- c("Brain11", "Brain12","Brain13","Spleen11", "Spleen12","Spleen13","Kidney11","Kidney17","Kidney18")
+
+rownames(x) <- rowData(rse_brain_selected)$gene_name
+
+y <- DGEList(counts=x)
+```
+
+# assigning proper grouping label to replicates of the same tissue
+```{r replicate labelling}
+group <- as.factor(c("Brain","Brain","Brain","Spleen","Spleen","Spleen","Kidney","Kidney","Kidney"))
+
+y$samples$group <- group
+```
+
+# incorporating sample-specific quality metrics present in the rse object within the $sample of the new DEGList
+```{r formatting DEGList with QC info}
+y$samples$rin <- as.factor(c(colData(rse_brain_selected)$gtex.smrin,colData(rse_spleen_selected)$gtex.smrin,colData(rse_kidney_selected)$gtex.smrin))
+ 
+y$samples$slice <- as.factor(c(colData(rse_brain_selected)$gtex.smtsd,colData(rse_spleen_selected)$gtex.smtsd,colData(rse_kidney_selected)$gtex.smtsd))
+
+y$samples$sex <- as.factor(c(colData(rse_brain_selected)$gtex.sex,colData(rse_spleen_selected)$gtex.sex,colData(rse_kidney_selected)$gtex.sex))
+
+y$samples$age <- as.factor(c(colData(rse_brain_selected)$gtex.age,colData(rse_spleen_selected)$gtex.age,colData(rse_kidney_selected)$gtex.age))
+
+y$samples$rRNA <- as.factor(c(colData(rse_brain_selected)$gtex.smrrnart,colData(rse_spleen_selected)$gtex.smrrnart,colData(rse_kidney_selected)$gtex.smrrnart))
+
+y$samples$mapped <- as.factor(c(colData(rse_brain_selected)$"recount_qc.star.uniquely_mapped_reads_%_both", colData(rse_spleen_selected)$"recount_qc.star.uniquely_mapped_reads_%_both",colData(rse_kidney_selected)$"recount_qc.star.uniquely_mapped_reads_%_both"))
+
+y$samples$chrm <- as.factor(c(colData(rse_brain_selected)$"recount_qc.aligned_reads%.chrm", colData(rse_spleen_selected)$"recount_qc.aligned_reads%.chrm",colData(rse_kidney_selected)$"recount_qc.aligned_reads%.chrm"))
+
+head(y$samples)
+```
+
+# removal of genes with 0 counts and low expression across all 9 samples
+```{r low expression removal, collapse=TRUE}
+table(rowSums(y$counts==0)==9)
+
+dim(y)
+
+keep.exprs <- filterByExpr(y, group=group)
+  y <- y[keep.exprs,, keep.lib.sizes=FALSE]
+  
+dim(y)
+```
+
+required to remove all the **genes with 0 counts or quasi 0 counts**
+This step is **necessary** because these genes have to be **removed from the statistical estimation of parameters**
+remember that it is made by considering ALL the genes together and these would be useless and just affect it uselessly
+
+# normalizing the data and visualizing its effects on the logCPM
+```{r TMM normalization}
+logcpm_before <- cpm(y, log=TRUE)
+y <- calcNormFactors(y, method = "TMM")
+head(y$samples)
+logcpm_after <- cpm(y, log=TRUE)
+
+
+par(mar = c(5, 4, 4, 2) +0.1, cex.lab = 0.8)
+boxplot(logcpm_before, xaxt = "n", names = colnames(logcpm_before), main='LogCPM boxplot before normalization', ylab = 'LogCPM Values')
+axis(1, at = 1:length(colnames(logcpm_before)), labels = colnames(logcpm_before), las = 2, cex.axis = 0.8)  
+
+
+boxplot(logcpm_after, xaxt = "n", names = colnames(logcpm_after), main='LogCPM boxplot after normalization', ylab = 'LogCPM Values')
+axis(1, at = 1:length(colnames(logcpm_after)), labels = colnames(logcpm_after), las = 2, cex.axis = 0.8)  
+
+
+```
+
+When the normalization factor is > 1, the corresponding box is shifted down viceversa if < 1 seems to be shifted up
+
+# creation of the intercept-less design matrix
+```{r design matrix}
+design <- model.matrix(~0+group, data=y$samples)
+colnames(design) <- levels(y$samples$group)
+design
+```
+
+since interceptless I'm saying that the three conditions are independent from one another and so no baseline condition
+
+(if I were to put the brain as baseline, the results would not change, it's just a matter of describing between the samples)
+
+# plotting samples with MDS and inference of putative most relevant sources of variability in our data (among replicates)
+```{r MDS plotting}
+logcpm <- cpm(y, log=TRUE)
+plotMDS(logcpm, labels=group, main = '2D plotting of replicates via MDS')
+plotMDS(logcpm, labels=y$samples$rin)
+plotMDS(logcpm, labels=y$samples$slice)
+plotMDS(logcpm, labels=y$samples$sex)
+plotMDS(logcpm, labels=y$samples$age)
+plotMDS(logcpm, labels=y$samples$mapped)
+plotMDS(logcpm, labels=y$samples$rRNA)
+plotMDS(logcpm, labels=y$samples$chrm, main = 'MDS for identification of main putative source of variability in the data', xlab = 'Leading logFC dim1 based on mtRNA', ylab = 'Leading logFC dim1 based on mtRNA')
+```
+
+While attempting to find  the main sources of variability in your data, none of the saved information seemed evidently responsible for the increased distance among Kidney samples; 
+the only possibility, albeit weak, is that the amount of mtRNA might be responsible for it since its the only scenario where I could see a trend of samples with higher percentages tending to cluster together/isolate from the rest
+
+# dispersion estimation as parameter of the NB distribution employed
+```{r dispersion estimation}
+y <- estimateDisp(y, design)
+plotBCV(y)
+y
+```
+
+# fitting the generalized linear model (beta parameter estimation)
+```{r generalized linear model}
+fit <- glmQLFit(y, design)
+```
+
+# performing all the pairwise contrasts among the 3 tissues
+```{r pairwise contrasting}
+#kidney (top) vs brain (bottom)
+qlfKB <- glmQLFTest(fit, contrast=c(-1,1,0))
+#spleen (top) vs brain (bottom)
+qlfSB <- glmQLFTest(fit, contrast=c(-1,0,1))
+#spleen (top) vs kidney (bottom)
+qlfSK <- glmQLFTest(fit, contrast=c(0,-1,1))
+
+# inspecting how these new object work:
+qlfSB
+head(qlfSB$table)
+```
+
+
+# extracting and storing DE genes and exporting in an excel table
+```{r DEG gene excel creation}
+resultsKB <- topTags(qlfKB, n = 10000000, adjust.method = "BH", sort.by = "PValue", p.value = 1)
+resultsSB <- topTags(qlfSB, n = 10000000, adjust.method = "BH", sort.by = "PValue", p.value = 1)
+resultsSK <- topTags(qlfSK, n = 10000000, adjust.method = "BH", sort.by = "PValue", p.value = 1)
+write.table(resultsKB, "resultsKB.txt")
+write.table(resultsSB, "resultsSB.txt")
+write.table(resultsSK, "resultsSK.txt")
+```
+
+# counting DEG genes at different FDR/FC thresholds
+```{r DEG treshold, collapse=TRUE}
+summary(decideTests(qlfKB, p.value=0.05, lfc=0))
+summary(decideTests(qlfKB, p.value=0.05, lfc=1))
+summary(decideTests(qlfKB, p.value=0.01, lfc=0))
+summary(decideTests(qlfKB, p.value=0.01, lfc=1))
+
+summary(decideTests(qlfSB, p.value=0.05, lfc=0))
+summary(decideTests(qlfSB, p.value=0.05, lfc=1))
+summary(decideTests(qlfSB, p.value=0.01, lfc=0))
+summary(decideTests(qlfSB, p.value=0.01, lfc=1))
+
+summary(decideTests(qlfSK, p.value=0.05, lfc=0))
+summary(decideTests(qlfSK, p.value=0.05, lfc=1))
+summary(decideTests(qlfSK, p.value=0.01, lfc=0))
+summary(decideTests(qlfSK, p.value=0.01, lfc=1))
+```
+
+# finding the shared genes to be then printed on the corresponding excel column
+```{r overlapping genes}
+library(readxl)
+
+
+k_KB <- na.omit(read_excel("DEG genes.xlsx", sheet = "K specific")$KB)
+k_SK <- na.omit(read_excel("DEG genes.xlsx", sheet = "K specific")$SK)
+k <- intersect(k_KB, k_SK)
+
+s_SB <- na.omit(read_excel("DEG genes.xlsx", sheet = "S specific")$SB)
+s_SK <- na.omit(read_excel("DEG genes.xlsx", sheet = "S specific")$SK)
+s <- intersect(s_SB, s_SK)
+
+b_KB <- na.omit(read_excel("DEG genes.xlsx", sheet = "B specific")$KB)
+b_SB <- na.omit(read_excel("DEG genes.xlsx", sheet = "B specific")$SB)
+b <- intersect(b_KB, b_SB)
+
+
+write.table(k, "K_specific.txt", quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(s, "S_specific.txt", quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(b, "B_specific.txt", quote = FALSE, row.names = FALSE, col.names = FALSE)
+```
+
+
+# check whether one of the genes that were DE among these samples are still DE if we consider the complete tissue datasets
+```{r marker gene}
+assays(rse_brain)$TPM <- recount::getTPM(rse_brain)
+assays(rse_spleen)$TPM <- recount::getTPM(rse_spleen)
+assays(rse_kidney)$TPM <- recount::getTPM(rse_kidney)
+
+
+
+ PMP2 <- which(rowData(rse_brain)$gene_name == "PMP2")
+boxplot(assays(rse_brain)$TPM[PMP2,], assays(rse_spleen)$TPM[PMP2,], assays(rse_kidney)$TPM[PMP2,], outline=F, main = 'PMP2 expression', ylab=' TPM values', xaxt = "n", names=c('Brain', 'Spleen','Kidney'))
+axis(1, at = 1:3, labels = c('Brain', 'Spleen','Kidney'), las = 2, cex.axis = 0.8)
+
+
+
+ITGB6 <- which(rowData(rse_brain)$gene_name == "ITGB6")
+boxplot(assays(rse_brain)$TPM[ITGB6,], assays(rse_spleen)$TPM[ITGB6,], assays(rse_kidney)$TPM[ITGB6,], outline=F, main = 'ITGB6 expression', ylab=' TPM values', xaxt = "n", names=c('Brain', 'Spleen','Kidney'))
+axis(1, at = 1:3, labels = c('Brain', 'Spleen','Kidney'), las = 2, cex.axis = 0.8)
+
+
+STAB2 <- which(rowData(rse_brain)$gene_name == "STAB2")
+boxplot(assays(rse_brain)$TPM[STAB2,], assays(rse_spleen)$TPM[STAB2,], assays(rse_kidney)$TPM[STAB2,], outline=F, main = 'STAB2 expression', ylab=' TPM values', xaxt = "n", names=c('Brain', 'Spleen','Kidney'))
+axis(1, at = 1:3, labels = c('Brain', 'Spleen','Kidney'), las = 2, cex.axis = 0.8)
+
+```
+
+# test for significance
+```{r significance test}
+ # maybe Mann-Whitney ?????? or a
+```
+
+Now, find the most appropriate statistical test, and prove that the difference of expression for the gene is still significant if we consider all the samples, instead of just three per tissue.
+
+
+
+
+
+
+
