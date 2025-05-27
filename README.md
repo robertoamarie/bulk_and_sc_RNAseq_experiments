@@ -1,4 +1,4 @@
-READAPT THE README
+# TODO: READAPT THE README
 
 # bulk-RNAseq analysis
 
